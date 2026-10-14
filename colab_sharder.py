@@ -25,9 +25,13 @@ import threading
 import subprocess
 from collections import defaultdict
 
-UPSTREAM_URL = "https://white-unit-5eae.conipy.workers.dev/dlink-fetch?token=8A3J8BxlX9eiEuBKvj2azBOmnKNb2NmzqscFjmpWRaf9b3GmCdBJMn_8QjQ14LZN04nMNlJhBF1W7a2c9PuAr3h6vdAeUS8GRr2uXcYJkz0DKXogjIvzrKV2MsQHG6udlKBfWk1Dkoz_g04OaccMykZ11R34fPbCzr7psiX9KVhNZbxqNNaKDuUE9ZAtg7Ex2F4G0FiG4n_Ip6-ONBMCkZGxY7vv6kBQi-nG7GUqNu1gwqgTbc9S-S3cXJk8RBDqUovl6A-PPeLxhXF2tTOxSQuZGhVZk8BCDUyUQWJBKF2dbWW48hhlerYGABCeBneHAva1BcVra748FM584idCvMgd3BUGUWik8vinVU5w9KoDcXoODxOcR4TYhGagW65PhaMKZXZzvHTir77g&file_name=users_data.zip"
+UPSTREAM_URL = os.environ.get(
+    "UPSTREAM_URL",
+    "https://white-unit-5eae.conipy.workers.dev/dlink-fetch?token=8A3J8BxlX9eiEuBKvj2azBOmnKNb2NmzqscFjmpWRaf9b3GmCdBJMn_8QjQ14LZN04nMNlJhBF1W7a2c9PuAr3h6vdAeUS8GRr2uXcYJkz0DKXogjIvzrKV2MsQHG6udlKBfWk1Dkoz_g04OaccMykZ11R34fPbCzr7psiX9KVhNZbxqNNaKDuUE9ZAtg7Ex2F4G0FiG4n_Ip6-ONBMCkZGxY7vv6kBQi-nG7GUqNu1gwqgTbc9S-S3cXJk8RBDqUovl6A-PPeLxhXF2tTOxSQuZGhVZk8BCDUyUQWJBKF2dbWW48hhlerYGABCeBneHAva1BcVra748FM584idCvMgd3BUGUWik8vinVU5w9KoDcXoODxOcR4TYhGagW65PhaMKZXZzvHTir77g&file_name=users_data.zip",
+)
 
-GITHUB_REPO = "namanyash2009-crypto/users-shards"
+GITHUB_REPO = os.environ.get("GITHUB_REPO", "namanyash2009-crypto/users-shards")
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 HEADER_OFFSET = 93          # local file header size of users_data.json inside the zip
 CHUNK_SIZE = 4 << 20        # 4 MB download chunks
 FLUSH_EVERY_SECONDS = 300   # write partial shards every 5 min (crash safe)
@@ -46,7 +50,6 @@ kmail = defaultdict(dict)  # kw_email_<domain>.json
 kname = defaultdict(dict)  # kw_name_<hex>.json
 kaddr = defaultdict(dict)  # kw_addr_<hex>.json
 kcir = {}                  # kw_circle.json
-meta = {}                  # id -> mobile (tiny, for id reverse lookups)
 
 # asset split: file name -> (release tag, asset name)
 assets = {}
@@ -79,15 +82,24 @@ def g(args, check=True):
 
 
 def ensure_github():
-    r = g(["auth", "status"], check=False)
-    if r.returncode != 0:
-        tok = os.environ.get("GITHUB_TOKEN") or input("Paste a GitHub token with repo scope: ").strip()
+    try:
+        r = g(["auth", "status"], check=False)
+        authed = r.returncode == 0
+    except FileNotFoundError:
+        sys.exit("'gh' CLI not found. Install it first (see the Colab install cell).")
+
+    if not authed:
+        tok = GITHUB_TOKEN
         if not tok:
-            sys.exit("No GitHub token.")
+            sys.exit(
+                "No GitHub token. Set it before running:\n"
+                "  import os; os.environ['GITHUB_TOKEN'] = 'ghp_...'\n"
+                "(token needs the 'repo' scope)"
+            )
         p = subprocess.run(["gh", "auth", "login", "--with-token"], input=tok, text=True,
                            capture_output=True)
         if p.returncode != 0:
-            sys.exit("GitHub login failed: " + (p.stderr or ""))
+            sys.exit("GitHub login failed: " + (p.stderr or p.stdout or "unknown error"))
 
 
 class ReleasePool:
@@ -267,8 +279,6 @@ def writer():
             b[loc] = mobile
             if len(b) >= KEYWORD_FLUSH_AT:
                 write_kw("kw_email", {dom: b})
-        if rid and mobile:
-            meta[rid] = mobile
 
         # full-record shards
         if len(mobile) >= 9:
@@ -289,8 +299,6 @@ def writer():
             rate = stats["records"] / el if el else 0
             print("[%6.1f min] %,d records | %,d core shards | %,d corrupt | %.0f rec/s"
                   % (el / 60, stats["records"], stats["core"], stats["corrupt"], rate), flush=True)
-            if len(meta) > 4000000:
-                meta.clear()   # keep RAM low; meta is only a safety net
 
         if time.time() - last_flush[0] > FLUSH_EVERY_SECONDS:
             flush_all()
