@@ -78,6 +78,7 @@ HEADER_OFFSET = 93
 F_MOBILE, F_EMAIL, F_NAME = 0, 1, 2
 FIELD_BUCKETS = {F_MOBILE: MOB_BUCKETS, F_EMAIL: MAIL_BUCKETS, F_NAME: NAME_BUCKETS}
 FIELD_PREFIX = {F_MOBILE: "m", F_EMAIL: "e", F_NAME: "n"}
+T0 = time.time()
 
 # ----------------------------------------------------------------- helpers
 
@@ -134,31 +135,58 @@ def iter_source_bytes():
                     yield c
         return
 
-    # remote zip: read the local file header to find the payload offset, inflate
-    hreq = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0",
-                                                "Range": "bytes=0-4095"})
-    with urllib.request.urlopen(hreq, timeout=60) as hr:
-        head = hr.read()
+    # remote zip: read the local file header to find the payload offset, inflate.
+    # NB: some hosts advertise Range but sometimes ignore it and answer 200 with
+    # the whole file from byte 0.  We must therefore (a) never read more than the
+    # header we asked for, and (b) if the stream starts at 0, skip the header.
+    head = b""
+    for attempt in range(3):
+        try:
+            hreq = urllib.request.Request(src, headers={"User-Agent": "Mozilla/5.0",
+                                                        "Range": "bytes=0-4095"})
+            with urllib.request.urlopen(hreq, timeout=60) as hr:
+                head = hr.read(4096)          # NOT hr.read() – never fetch the whole file
+            break
+        except Exception as e:
+            if attempt == 2:
+                sys.exit("cannot read remote zip header: %r" % e)
+            print("  header fetch failed (%r); retrying..." % e)
+            time.sleep(4)
     if head[:4] != b"PK\x03\x04":
-        sys.exit("Remote source is not a zip (or Range unsupported).")
+        sys.exit("Remote source did not return a zip local header (got %r)." % head[:8])
     fn_len = struct.unpack("<H", head[26:28])[0]
     ex_len = struct.unpack("<H", head[28:30])[0]
     offset = 30 + fn_len + ex_len
-    print("payload offset in zip: %d  (entry %r)" % (offset, head[30:30 + fn_len].decode("utf-8", "ignore")))
+    print("payload offset in zip: %d  (entry %r)"
+          % (offset, head[30:30 + fn_len].decode("utf-8", "ignore")))
 
     req = urllib.request.Request(src, headers={
         "User-Agent": "Mozilla/5.0",
         "Range": "bytes=%d-" % offset,
     })
     d = zlib.decompressobj(-zlib.MAX_WBITS)
+    t_last = time.time()
     with urllib.request.urlopen(req, timeout=180) as resp:
+        status = getattr(resp, "status", None) or resp.getcode()
+        skip = offset if status == 200 else 0      # 200 => Range ignored, stream from 0
+        if skip:
+            print("  note: host ignored Range on GET; skipping %d header bytes" % skip)
         while True:
             c = resp.read(4 << 20)
             if not c:
                 break
+            if skip:
+                if len(c) <= skip:
+                    skip -= len(c)
+                    continue
+                c = c[skip:]
+                skip = 0
             out = d.decompress(c)
             if out:
                 yield out
+            if time.time() - t_last > 60:
+                t_last = time.time()
+                print("  ... streaming source (%.1f min elapsed)" % ((time.time() - T0) / 60), flush=True)
     tail = d.flush()
     if tail:
         yield tail
